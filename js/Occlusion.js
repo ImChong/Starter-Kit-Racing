@@ -16,6 +16,10 @@ const PROBE_OFFSETS = [
 	[ 0, 0.7 ],
 ];
 
+// Position quantization used to weld coincident vertices when splitting a
+// geometry into connected components.
+const WELD_PRECISION = 1e-4;
+
 const _origin = new THREE.Vector3();
 const _target = new THREE.Vector3();
 const _probe = new THREE.Vector3();
@@ -23,36 +27,171 @@ const _dir = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _up = new THREE.Vector3();
 
-function makeTransparent( material ) {
+// Each track piece is one merged mesh — the finish line, for instance, holds
+// the road slab and the arch in a single geometry. Splitting it into connected
+// components lets the arch fade on its own while the road it spans stays solid.
+function getComponents( geometry ) {
 
-	const faded = material.clone();
-	faded.transparent = true;
-	faded.depthWrite = true;
-	return faded;
+	let components = geometry.userData.occlusionComponents;
+	if ( components !== undefined ) return components;
+
+	const position = geometry.getAttribute( 'position' );
+	const index = geometry.getIndex();
+	const vertexCount = position.count;
+
+	const parent = new Int32Array( vertexCount );
+	for ( let i = 0; i < vertexCount; i ++ ) parent[ i ] = i;
+
+	function find( a ) {
+
+		while ( parent[ a ] !== a ) {
+
+			parent[ a ] = parent[ parent[ a ] ];
+			a = parent[ a ];
+
+		}
+
+		return a;
+
+	}
+
+	function union( a, b ) {
+
+		a = find( a );
+		b = find( b );
+		if ( a !== b ) parent[ b ] = a;
+
+	}
+
+	// Vertices at the same position belong to the same piece even when the
+	// exporter split them for hard edges.
+	const welded = new Map();
+
+	for ( let i = 0; i < vertexCount; i ++ ) {
+
+		const key = Math.round( position.getX( i ) / WELD_PRECISION ) + '_' +
+			Math.round( position.getY( i ) / WELD_PRECISION ) + '_' +
+			Math.round( position.getZ( i ) / WELD_PRECISION );
+
+		const previous = welded.get( key );
+		if ( previous === undefined ) welded.set( key, i );
+		else union( previous, i );
+
+	}
+
+	const triangleCount = index ? index.count / 3 : vertexCount / 3;
+
+	for ( let t = 0; t < triangleCount; t ++ ) {
+
+		const a = index ? index.getX( t * 3 ) : t * 3;
+		const b = index ? index.getX( t * 3 + 1 ) : t * 3 + 1;
+		const c = index ? index.getX( t * 3 + 2 ) : t * 3 + 2;
+
+		union( a, b );
+		union( a, c );
+
+	}
+
+	const ids = new Map();
+	const vertexComponents = new Float32Array( vertexCount );
+
+	for ( let i = 0; i < vertexCount; i ++ ) {
+
+		const root = find( i );
+		let id = ids.get( root );
+
+		if ( id === undefined ) {
+
+			id = ids.size;
+			ids.set( root, id );
+
+		}
+
+		vertexComponents[ i ] = id;
+
+	}
+
+	const faceComponents = new Uint16Array( triangleCount );
+
+	for ( let t = 0; t < triangleCount; t ++ ) {
+
+		faceComponents[ t ] = vertexComponents[ index ? index.getX( t * 3 ) : t * 3 ];
+
+	}
+
+	geometry.setAttribute( 'componentId', new THREE.BufferAttribute( vertexComponents, 1 ) );
+
+	components = { count: ids.size, faceComponents };
+	geometry.userData.occlusionComponents = components;
+
+	return components;
 
 }
 
-// Per-instance alpha for InstancedMesh: one instance of a forest can fade
-// without taking the rest of the forest with it.
-function makeInstancedFadeMaterial( material ) {
+// One byte of alpha per component, looked up in the shader by component id.
+function createComponentTexture( count ) {
 
-	const faded = makeTransparent( material );
+	const data = new Uint8Array( count ).fill( 255 );
+	const texture = new THREE.DataTexture( data, count, 1, THREE.RedFormat, THREE.UnsignedByteType );
 
-	faded.onBeforeCompile = ( shader ) => {
+	// One texel per component: no filtering, no mipmaps, and byte-aligned rows
+	// so a component count that is not a multiple of four still reads back.
+	texture.magFilter = THREE.NearestFilter;
+	texture.minFilter = THREE.NearestFilter;
+	texture.generateMipmaps = false;
+	texture.unpackAlignment = 1;
+	texture.needsUpdate = true;
 
-		shader.vertexShader = shader.vertexShader
-			.replace( '#include <common>', '#include <common>\nattribute float instanceAlpha;\nvarying float vInstanceAlpha;' )
-			.replace( '#include <begin_vertex>', '#include <begin_vertex>\nvInstanceAlpha = instanceAlpha;' );
+	return texture;
 
-		shader.fragmentShader = shader.fragmentShader
-			.replace( '#include <common>', '#include <common>\nvarying float vInstanceAlpha;' )
-			.replace( '#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vInstanceAlpha;' );
+}
 
-	};
+function createFadeMaterial( material, texture, count, instanced ) {
 
-	// Without its own cache key this would share a compiled program with the
-	// untouched original material.
-	faded.customProgramCacheKey = () => 'instance-alpha';
+	const faded = Array.isArray( material ) ? material.map( ( m ) => m.clone() ) : material.clone();
+	const list = Array.isArray( faded ) ? faded : [ faded ];
+
+	for ( const target of list ) {
+
+		target.transparent = true;
+		target.depthWrite = true;
+
+		target.onBeforeCompile = ( shader ) => {
+
+			shader.uniforms.componentAlpha = { value: texture };
+			shader.uniforms.componentCount = { value: count };
+
+			shader.vertexShader = shader.vertexShader
+				.replace( '#include <common>', `#include <common>
+					attribute float componentId;
+					varying float vComponentId;
+					${ instanced ? 'attribute float instanceAlpha;\nvarying float vInstanceAlpha;' : '' }` )
+				.replace( '#include <begin_vertex>', `#include <begin_vertex>
+					vComponentId = componentId;
+					${ instanced ? 'vInstanceAlpha = instanceAlpha;' : '' }` );
+
+			shader.fragmentShader = shader.fragmentShader
+				.replace( '#include <common>', `#include <common>
+					uniform sampler2D componentAlpha;
+					uniform float componentCount;
+					varying float vComponentId;
+					${ instanced ? 'varying float vInstanceAlpha;' : '' }` )
+				.replace( '#include <color_fragment>', `#include <color_fragment>
+					float componentFade = texture2D( componentAlpha, vec2( ( vComponentId + 0.5 ) / componentCount, 0.5 ) ).r;
+					${ instanced
+						// Only instances that are themselves fading pick up the
+						// component alpha — component ids are shared by every
+						// instance of the geometry.
+						? 'diffuseColor.a *= 1.0 - ( 1.0 - vInstanceAlpha ) * ( 1.0 - componentFade );'
+						: 'diffuseColor.a *= componentFade;' }` );
+
+		};
+
+		// Without its own cache key this would share a compiled program with the
+		// untouched original material.
+		target.customProgramCacheKey = () => ( instanced ? 'occlusion-instanced' : 'occlusion' );
+
+	}
 
 	return faded;
 
@@ -72,46 +211,32 @@ export class OcclusionFade {
 
 	createState( mesh ) {
 
-		const original = mesh.material;
+		const components = getComponents( mesh.geometry );
+		const texture = createComponentTexture( components.count );
+		const instanced = mesh.isInstancedMesh === true;
 
-		if ( mesh.isInstancedMesh ) {
+		const state = {
+			instanced,
+			components,
+			texture,
+			original: mesh.material,
+			faded: createFadeMaterial( mesh.material, texture, components.count, instanced ),
+			componentAlphas: new Map(),
+		};
 
-			const count = mesh.count;
-			const alphas = new Float32Array( count ).fill( 1 );
+		if ( instanced ) {
+
+			const alphas = new Float32Array( mesh.count ).fill( 1 );
 			const attribute = new THREE.InstancedBufferAttribute( alphas, 1 );
 			attribute.setUsage( THREE.DynamicDrawUsage );
 			mesh.geometry.setAttribute( 'instanceAlpha', attribute );
 
-			return {
-				instanced: true,
-				original,
-				faded: makeInstancedFadeMaterial( original ),
-				attribute,
-				opacities: new Map(),
-			};
+			state.attribute = attribute;
+			state.instanceAlphas = new Map();
 
 		}
 
-		return {
-			instanced: false,
-			original,
-			faded: Array.isArray( original ) ? original.map( makeTransparent ) : makeTransparent( original ),
-			opacity: 1,
-		};
-
-	}
-
-	setOpacity( state, opacity ) {
-
-		if ( Array.isArray( state.faded ) ) {
-
-			for ( const material of state.faded ) material.opacity = opacity;
-
-		} else {
-
-			state.faded.opacity = opacity;
-
-		}
+		return state;
 
 	}
 
@@ -123,8 +248,7 @@ export class OcclusionFade {
 		_target.copy( targetPos );
 		_origin.copy( camera.position );
 
-		const distance = _origin.distanceTo( _target );
-		if ( distance <= TARGET_MARGIN ) return;
+		if ( _origin.distanceTo( _target ) <= TARGET_MARGIN ) return;
 
 		_right.set( 1, 0, 0 ).applyQuaternion( camera.quaternion );
 		_up.set( 0, 1, 0 ).applyQuaternion( camera.quaternion );
@@ -146,17 +270,26 @@ export class OcclusionFade {
 			for ( const hit of this.intersections ) {
 
 				const mesh = hit.object;
-				if ( ! mesh.isMesh || ! mesh.visible ) continue;
+				if ( ! mesh.isMesh || ! mesh.visible || hit.faceIndex === undefined ) continue;
 
-				let ids = hits.get( mesh );
-				if ( ids === undefined ) {
+				let entry = hits.get( mesh );
+				if ( entry === undefined ) {
 
-					ids = new Set();
-					hits.set( mesh, ids );
+					entry = { components: new Set(), instances: new Set() };
+					hits.set( mesh, entry );
 
 				}
 
-				ids.add( mesh.isInstancedMesh ? hit.instanceId : - 1 );
+				let state = this.states.get( mesh );
+				if ( state === undefined ) {
+
+					state = this.createState( mesh );
+					this.states.set( mesh, state );
+
+				}
+
+				entry.components.add( state.components.faceComponents[ hit.faceIndex ] );
+				if ( mesh.isInstancedMesh ) entry.instances.add( hit.instanceId );
 
 			}
 
@@ -166,82 +299,81 @@ export class OcclusionFade {
 
 	}
 
+	// Steps one set of fading values toward their targets and reports whether
+	// any of them are still away from rest.
+	stepValues( values, hitIds, restValue, fadeValue, t, apply ) {
+
+		if ( hitIds !== undefined ) {
+
+			for ( const id of hitIds ) if ( ! values.has( id ) ) values.set( id, restValue );
+
+		}
+
+		for ( const [ id, value ] of values ) {
+
+			const target = hitIds !== undefined && hitIds.has( id ) ? fadeValue : restValue;
+			const next = value + ( target - value ) * t;
+
+			if ( target === restValue && Math.abs( next - restValue ) < 0.01 ) {
+
+				values.delete( id );
+				apply( id, restValue );
+
+			} else {
+
+				values.set( id, next );
+				apply( id, next );
+
+			}
+
+		}
+
+		return values.size > 0;
+
+	}
+
 	update( dt, camera, targetPos ) {
 
 		this.collectHits( camera, targetPos );
-
-		for ( const mesh of this.hits.keys() ) {
-
-			if ( ! this.states.has( mesh ) ) this.states.set( mesh, this.createState( mesh ) );
-
-		}
 
 		const t = 1 - Math.exp( - dt * FADE_RATE );
 
 		for ( const [ mesh, state ] of this.states ) {
 
-			const ids = this.hits.get( mesh );
+			const hit = this.hits.get( mesh );
+			const data = state.texture.image.data;
+
+			let fading = this.stepValues(
+				state.componentAlphas,
+				hit && hit.components,
+				1,
+				FADE_OPACITY,
+				t,
+				( id, value ) => data[ id ] = Math.round( value * 255 )
+			);
+
+			state.texture.needsUpdate = true;
 
 			if ( state.instanced ) {
 
-				const opacities = state.opacities;
+				const attribute = state.attribute;
 
-				if ( ids !== undefined ) {
+				fading = this.stepValues(
+					state.instanceAlphas,
+					hit && hit.instances,
+					1,
+					0,
+					t,
+					( id, value ) => attribute.setX( id, value )
+				) || fading;
 
-					for ( const id of ids ) if ( ! opacities.has( id ) ) opacities.set( id, 1 );
-
-				}
-
-				for ( const [ id, opacity ] of opacities ) {
-
-					const target = ids !== undefined && ids.has( id ) ? FADE_OPACITY : 1;
-					const next = opacity + ( target - opacity ) * t;
-
-					if ( target === 1 && next > 0.99 ) {
-
-						opacities.delete( id );
-						state.attribute.setX( id, 1 );
-
-					} else {
-
-						opacities.set( id, next );
-						state.attribute.setX( id, next );
-
-					}
-
-				}
-
-				state.attribute.needsUpdate = true;
-
-				if ( opacities.size === 0 ) {
-
-					mesh.material = state.original;
-					this.states.delete( mesh );
-
-				} else {
-
-					mesh.material = state.faded;
-
-				}
-
-			} else {
-
-				const target = ids !== undefined ? FADE_OPACITY : 1;
-				state.opacity += ( target - state.opacity ) * t;
-
-				if ( target === 1 && state.opacity > 0.99 ) {
-
-					mesh.material = state.original;
-					this.states.delete( mesh );
-
-				} else {
-
-					this.setOpacity( state, state.opacity );
-					mesh.material = state.faded;
-
-				}
+				attribute.needsUpdate = true;
 
 			}
+
+			mesh.material = fading ? state.faded : state.original;
+
+			if ( ! fading ) this.states.delete( mesh );
 
 		}
 
