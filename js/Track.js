@@ -115,6 +115,7 @@ const NPC_TRUCKS = [
 	[ 'vehicle-truck-red',    -1.36, -0.15, -23.80, 155.9 ],
 ];
 
+// Returns the objects that can come between the camera and the vehicle.
 export function buildTrack( scene, models, customCells ) {
 
 	const trackGroup = new THREE.Group();
@@ -277,6 +278,8 @@ export function buildTrack( scene, models, customCells ) {
 
 	} );
 
+	const npcs = [];
+
 	if ( ! customCells ) {
 
 		for ( const [ key, x, y, z, rotDeg ] of NPC_TRUCKS ) {
@@ -298,10 +301,14 @@ export function buildTrack( scene, models, customCells ) {
 
 			} );
 			scene.add( npc );
+			npcs.push( npc );
 
 		}
 
 	}
+
+	// Roots to raycast against for the occlusion fade
+	return [ trackGroup, ...npcs ];
 
 }
 
