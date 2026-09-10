@@ -20,6 +20,10 @@ const PROBE_OFFSETS = [
 // geometry into connected components.
 const WELD_PRECISION = 1e-4;
 
+// Faded occluders draw before every other transparent object — the drift marks
+// sit at -1 — so whatever they were hiding blends back over them.
+const FADED_RENDER_ORDER = - 2;
+
 const _origin = new THREE.Vector3();
 const _target = new THREE.Vector3();
 const _probe = new THREE.Vector3();
@@ -154,7 +158,10 @@ function createFadeMaterial( material, texture, count, instanced ) {
 	for ( const target of list ) {
 
 		target.transparent = true;
-		target.depthWrite = true;
+
+		// Drawing first without writing depth keeps the faded object from
+		// masking anything that renders after it.
+		target.depthWrite = false;
 
 		target.onBeforeCompile = ( shader ) => {
 
@@ -220,6 +227,7 @@ export class OcclusionFade {
 			components,
 			texture,
 			original: mesh.material,
+			renderOrder: mesh.renderOrder,
 			faded: createFadeMaterial( mesh.material, texture, components.count, instanced ),
 			componentAlphas: new Map(),
 		};
@@ -372,6 +380,7 @@ export class OcclusionFade {
 			}
 
 			mesh.material = fading ? state.faded : state.original;
+			mesh.renderOrder = fading ? FADED_RENDER_ORDER : state.renderOrder;
 
 			if ( ! fading ) this.states.delete( mesh );
 
