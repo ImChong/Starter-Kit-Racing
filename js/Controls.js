@@ -1,3 +1,7 @@
+// Fallback basis: the default camera sits at a 45° azimuth.
+const DEFAULT_RIGHT_XZ = { x: Math.SQRT1_2, z: - Math.SQRT1_2 };
+const DEFAULT_FORWARD_XZ = { x: - Math.SQRT1_2, z: - Math.SQRT1_2 };
+
 export class Controls {
 
 	constructor() {
@@ -105,7 +109,9 @@ export class Controls {
 
 	}
 
-	update() {
+	// basis: optional { camRightXZ, camForwardXZ } so touch steering stays
+	// screen-relative when the camera rotates with the vehicle.
+	update( basis = null ) {
 
 		let x = 0, z = 0;
 
@@ -136,7 +142,7 @@ export class Controls {
 
 		}
 
-		// Touch — joystick mapped to world space (camera is 45° azimuth)
+		// Touch — joystick mapped to world space through the camera ground basis
 
 		if ( this.touchActive ) {
 
@@ -146,8 +152,14 @@ export class Controls {
 
 			if ( mag > 0.15 ) {
 
-				x = ( jx + jy ) * Math.SQRT1_2 / mag;
-				z = ( - jx + jy ) * Math.SQRT1_2 / mag;
+				const nx = jx / mag;
+				const ny = jy / mag;
+
+				const right = basis ? basis.camRightXZ : DEFAULT_RIGHT_XZ;
+				const forward = basis ? basis.camForwardXZ : DEFAULT_FORWARD_XZ;
+
+				x = right.x * nx - forward.x * ny;
+				z = right.z * nx - forward.z * ny;
 
 			}
 

@@ -4,7 +4,7 @@ import { LightProbeGrid } from 'three/addons/lighting/LightProbeGrid.js';
 import { LightProbeGridHelper } from 'three/addons/helpers/LightProbeGridHelper.js';
 import { createWorldSettings, createWorld, addBroadphaseLayer, addObjectLayer, enableCollision, registerAll, updateWorld, rigidBody, box, MotionType } from 'crashcat';
 import { Vehicle, MAX_SPEED } from './Vehicle.js';
-import { Camera } from './Camera.js';
+import { Camera, CAMERA_MODE_FOLLOW } from './Camera.js';
 import { Controls } from './Controls.js';
 import { buildTrack, decodeCells, computeSpawnPosition, computeTrackBounds } from './Track.js';
 import { buildWallColliders, createSphereBody } from './Physics.js';
@@ -111,6 +111,46 @@ async function loadModels() {
 	);
 
 	await Promise.all( promises );
+
+}
+
+// Toggle between the fixed isometric view and the chase camera.
+function setupCameraToggle( cam ) {
+
+	const button = document.getElementById( 'camera-toggle' );
+
+	function sync() {
+
+		if ( button ) {
+
+			button.textContent = cam.mode === CAMERA_MODE_FOLLOW ? 'Camera: Follow' : 'Camera: Fixed';
+
+		}
+
+	}
+
+	sync();
+
+	if ( button ) {
+
+		button.addEventListener( 'click', () => {
+
+			cam.toggleMode();
+			sync();
+			button.blur();
+
+		} );
+
+	}
+
+	window.addEventListener( 'keydown', ( e ) => {
+
+		if ( e.code !== 'KeyC' || e.repeat ) return;
+
+		cam.toggleMode();
+		sync();
+
+	} );
 
 }
 
@@ -223,6 +263,8 @@ async function init() {
 	const cam = new Camera();
 	scene.add( cam.debug );
 
+	setupCameraToggle( cam );
+
 	const controls = new Controls();
 
 	const particles = new SmokeTrails( scene );
@@ -260,7 +302,7 @@ async function init() {
 		timer.update();
 		const dt = Math.min( timer.getDelta(), 1 / 30 );
 
-		const input = controls.update();
+		const input = controls.update( cam );
 
 		updateWorld( world, contactListener, dt );
 
@@ -273,8 +315,10 @@ async function init() {
 		);
 
 		const mv = vehicle.modelVelocity;
-		_camLead.set( 0, 0, 1 ).applyQuaternion( vehicle.container.quaternion ).multiplyScalar( Math.sqrt( mv.x * mv.x + mv.z * mv.z ) );
-		cam.update( dt, vehicle.spherePos, _camLead );
+		_camLead.set( 0, 0, 1 ).applyQuaternion( vehicle.container.quaternion );
+		const heading = Math.atan2( _camLead.x, _camLead.z );
+		_camLead.multiplyScalar( Math.sqrt( mv.x * mv.x + mv.z * mv.z ) );
+		cam.update( dt, vehicle.spherePos, _camLead, heading );
 		particles.update( dt, vehicle );
 		driftMarks.update( dt, vehicle );
 		audio.update( dt, vehicle.linearSpeed / MAX_SPEED, input.z, vehicle.driftIntensity );
