@@ -9,6 +9,7 @@ import { Controls } from './Controls.js';
 import { buildTrack, decodeCells, computeSpawnPosition, computeTrackBounds } from './Track.js';
 import { buildWallColliders, createSphereBody } from './Physics.js';
 import { SmokeTrails } from './Particles.js';
+import { OcclusionFade } from './Occlusion.js';
 import { DriftMarks } from './DriftMarks.js';
 import { GameAudio } from './Audio.js';
 import { LapTimer } from './LapTimer.js';
@@ -194,7 +195,7 @@ async function init() {
 	scene.fog.near = groundSize * 0.4;
 	scene.fog.far = groundSize * 0.8;
 
-	buildTrack( scene, models, customCells );
+	const occluders = buildTrack( scene, models, customCells );
 
 	// Probes
 
@@ -267,6 +268,8 @@ async function init() {
 
 	const controls = new Controls();
 
+	const occlusion = new OcclusionFade( occluders );
+
 	const particles = new SmokeTrails( scene );
 	const driftMarks = new DriftMarks( scene, mapParam );
 
@@ -319,6 +322,7 @@ async function init() {
 		const heading = Math.atan2( _camLead.x, _camLead.z );
 		_camLead.multiplyScalar( Math.sqrt( mv.x * mv.x + mv.z * mv.z ) );
 		cam.update( dt, vehicle.spherePos, _camLead, heading );
+		occlusion.update( dt, cam.camera, vehicle.spherePos );
 		particles.update( dt, vehicle );
 		driftMarks.update( dt, vehicle );
 		audio.update( dt, vehicle.linearSpeed / MAX_SPEED, input.z, vehicle.driftIntensity );

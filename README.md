@@ -2,7 +2,7 @@
 
 A JavaScript/Three.js port of [Kenney's Starter Kit Racing](https://github.com/KenneyNL/Starter-Kit-Racing).
 
-[Play](https://mrdoob.github.io/Starter-Kit-Racing/) · [Devlog](https://x.com/mrdoob/status/2048358619985690935)
+[Play](https://imchong.github.io/Starter-Kit-Racing/) · [Devlog](https://x.com/mrdoob/status/2048358619985690935)
 
 ![Screenshot](screenshot.png)
 
