@@ -10,7 +10,7 @@ Port of the Kenney "Starter Kit Racing" Godot 4.6 project to plain JavaScript an
   - `Track.js` — GridMap track layout and piece placement
   - `Vehicle.js` — Vehicle physics and controls
   - `Camera.js` — Camera system: fixed isometric view and vehicle-follow chase view
-  - `Occlusion.js` — Fades out objects that come between the camera and the vehicle
+  - `Occlusion.js` — Fades out whatever comes between the camera and the vehicle, split by connected geometry component (the finish arch fades, the road slab it shares a mesh with does not)
   - `Controls.js` — Input handling
   - `Particles.js` — Smoke trail effects
   - `Audio.js` — Sound: positional sources on the vehicle, distance lowpass, outdoor reverb; engine and impacts are synthesized, skid is a sample with tone/pitch variation
